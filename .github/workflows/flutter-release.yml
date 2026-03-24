@@ -1,0 +1,116 @@
+name: People Todolist Flutter Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Extract version from tag
+        run: |
+          echo "VERSION_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+
+      - name: Prepare Android signing files
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          mkdir -p android/keystore
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/keystore/release.keystore
+          cat <<EOF > android/key.properties
+          storeFile=keystore/release.keystore
+          storePassword=$ANDROID_KEYSTORE_PASSWORD
+          keyAlias=$ANDROID_KEY_ALIAS
+          keyPassword=$ANDROID_KEY_PASSWORD
+          EOF
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze & Test
+        run: |
+          flutter analyze --no-fatal-warnings --no-fatal-infos
+          flutter test
+
+      - name: Build Android arm64 release APK
+        run: |
+          flutter build apk \
+            --release \
+            --target-platform android-arm64 \
+            --build-name="${{ env.VERSION_NAME }}" \
+            --build-number="${{ env.VERSION_CODE }}"
+
+      - name: Rename APK artifact
+        run: |
+          ARTIFACT_PATH="build/app/outputs/flutter-apk/people_todolist_${{ env.VERSION_NAME }}_android-arm64-release.apk"
+          mv build/app/outputs/flutter-apk/app-release.apk "$ARTIFACT_PATH"
+          echo "ARTIFACT_PATH=$ARTIFACT_PATH" >> "$GITHUB_ENV"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: people-todolist-release-apk
+          path: ${{ env.ARTIFACT_PATH }}
+
+      - name: Create GitHub Release + upload APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -f CHANGELOG.md ]; then
+            NOTES=$(awk -v ver="${GITHUB_REF_NAME}" '
+            BEGIN { found=0 }
+            $0 ~ "^##[[:space:]]*" ver "$" { found=1; next }
+            $0 ~ "^##[[:space:]]+v" { if (found) exit }
+            found { print }
+            ' CHANGELOG.md)
+          fi
+
+          if [ -z "$NOTES" ]; then
+            NOTES="Release ${GITHUB_REF_NAME}"
+          fi
+
+          if gh release view "${GITHUB_REF_NAME}" > /dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${ARTIFACT_PATH}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "$NOTES" \
+              "${ARTIFACT_PATH}"
+          fi
