@@ -1,10 +1,11 @@
 import 'package:easy_localization/easy_localization.dart';
+import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:people_todolist/core/database/database.dart';
 import 'package:people_todolist/features/people/data/models/todo_with_people.dart';
-import 'package:people_todolist/features/people/providers/person_detail_provider.dart';
+import 'package:people_todolist/features/people/providers/people_database_providers.dart';
 import 'package:people_todolist/features/people/providers/people_provider.dart';
 import 'package:people_todolist/shared/widgets/add_todo_bottom_sheet.dart';
 
@@ -28,31 +29,20 @@ class _TestAssetLoader extends AssetLoader {
   }
 }
 
-class _FakePersonTodoActions extends PersonTodoActions {
-  _FakePersonTodoActions() : super(ref: ProviderContainer().read, uuid: const Uuid());
-
-  String? updatedNote;
-
-  @override
-  Future<void> updateTodo({
-    required String todoId,
-    required String title,
-    String? note,
-    DateTime? dueAt,
-    required bool starred,
-    List<String> participantPersonIds = const [],
-  }) async {
-    updatedNote = note;
-  }
-}
-
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets('editing keeps existing note when note field is hidden', (
     WidgetTester tester,
   ) async {
-    final fakeActions = _FakePersonTodoActions();
+    final database = AppDatabase(NativeDatabase.memory());
+    addTearDown(database.close);
+
+    await database.peopleDao.createPerson(
+      id: 'person-1',
+      name: 'Maya',
+      colorValue: 0xFF5B6CF0,
+    );
     final todo = Todo(
       id: 'todo-1',
       personId: 'person-1',
@@ -64,12 +54,21 @@ void main() {
       createdAt: DateTime(2026, 3, 25),
       updatedAt: DateTime(2026, 3, 25),
     );
+    await database.todosDao.createTodo(
+      id: todo.id,
+      personId: todo.personId,
+      title: todo.title,
+      note: todo.note,
+      starred: todo.starred,
+      dueAt: todo.dueAt,
+      done: todo.done,
+    );
 
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          appDatabaseProvider.overrideWithValue(database),
           peopleProvider.overrideWith((ref) => Stream.value(const <PeopleData>[])),
-          personTodoActionsProvider.overrideWithValue(fakeActions),
         ],
         child: EasyLocalization(
           supportedLocales: const [Locale('zh', 'TW')],
@@ -107,6 +106,8 @@ void main() {
     await tester.tap(find.text('更新'));
     await tester.pumpAndSettle();
 
-    expect(fakeActions.updatedNote, 'Existing note');
+    final updatedTodo = await database.todosDao.getTodoById('todo-1');
+    expect(updatedTodo, isNotNull);
+    expect(updatedTodo!.note, 'Existing note');
   });
 }
